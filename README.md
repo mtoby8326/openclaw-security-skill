@@ -1,42 +1,42 @@
 # OpenClaw Security Skill 🔒
 
-异步 PII（个人身份信息）检测引擎，作为 OpenClaw Skill 运行，扫描会话中的敏感数据并在本地生成审计日志。
+An async PII (Personally Identifiable Information) detection engine that runs as an OpenClaw Skill. It scans session content for sensitive data and logs audit events locally in NDJSON format.
 
-## ✨ 特性
+## ✨ Features
 
-- **8 类敏感信息检测** — 手机号、邮箱、身份证、护照、银行卡、姓名、地址、社交账号
-- **零外部依赖** — 纯 Python 标准库，开箱即用
-- **异步不阻塞** — 审计与主流程解耦，不影响用户响应
-- **智能误报控制** — 身份证校验位验证、银行卡 Luhn 校验、护照/姓名/地址关键词门控
-- **重叠去重** — 同一文本区间多检测器命中时，高置信度优先
-- **风险分级** — high / low 两级，支持单标签高风险和组合高风险
-- **本地落盘** — NDJSON 格式按天分目录，便于 grep / SIEM 导入
-- **自动清理** — 可配置保留期（默认 7 天）
+- **8 PII Categories** — Phone, Email, National ID, Passport, Bank Card, Person Name, Address, Social Account
+- **Zero Dependencies** — Pure Python stdlib, works out of the box
+- **Async & Non-blocking** — Audit is decoupled from the main workflow, never blocks user responses
+- **Smart False Positive Control** — National ID checksum, Bank Card Luhn validation, context-keyword gating for Passport/Name/Address
+- **Overlap Dedup** — When multiple detectors match the same text range, highest confidence wins
+- **Risk Scoring** — Two-level (high/low) with single-label and combo rules
+- **Local Storage** — NDJSON format, partitioned by date, grep/SIEM-friendly
+- **Auto Cleanup** — Configurable retention period (default: 7 days)
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
 ```bash
 git clone https://github.com/mtoby8326/openclaw-security-skill.git
 cd openclaw-security-skill
 ```
 
-### 扫描文本
+### Scan Text
 
 ```bash
-# 内联文本
+# Inline text
 python scripts/audit_worker.py --session-id S001 --source-type input \
-  --text "收件人：张三 手机号13812345678 邮箱test@gmail.com"
+  --text "Name: Zhang San, Phone: 13812345678, Email: test@gmail.com"
 
-# 从文件扫描
+# Scan from file
 python scripts/audit_worker.py --session-id S001 --source-type knowledge_base \
   --file path/to/content.txt
 
-# JSON 格式输出
+# JSON output
 python scripts/audit_worker.py --session-id S001 --source-type input \
-  --text "身份证号110101199003076536" --json
+  --text "ID: 110101199003076536" --json
 ```
 
-### 输出示例
+### Sample Output
 
 ```
 [HIGH] Detected 3 PII match(es)
@@ -44,7 +44,7 @@ python scripts/audit_worker.py --session-id S001 --source-type input \
   Audit:  openclaw-security-audit/2026-03-06/events.ndjson
 ```
 
-JSON 模式：
+JSON mode:
 
 ```json
 {
@@ -56,64 +56,64 @@ JSON 模式：
 }
 ```
 
-## 🏷️ 检测标签
+## 🏷️ Detection Labels
 
-| 标签 | 说明 | 置信度 | 验证方式 |
-|------|------|--------|----------|
-| `PHONE` | 中国手机号、座机、国际号码 | 0.90 | 位数校验 |
-| `EMAIL` | 电子邮箱地址 | 0.95 | 格式匹配 |
-| `NATIONAL_ID` | 中国身份证（18位） | 0.98 | ISO 7064 校验位 |
-| `PASSPORT` | 护照号码 | 0.85 | 上下文关键词门控 |
-| `BANK_CARD` | 银行卡号（13-19位） | 0.92 | Luhn 算法 |
-| `PERSON_NAME` | 中英文姓名 | 0.70 | 上下文关键词门控 |
-| `ADDRESS` | 中国地址（省/市/区/街道） | 0.75 | 结构化模式 + 关键词 |
-| `SOCIAL_ACCOUNT` | 微信/QQ/Twitter 等 | 0.80 | 上下文关键词门控 |
+| Label | Description | Confidence | Validation |
+|-------|-------------|------------|------------|
+| `PHONE` | CN mobile, landline, international | 0.90 | Digit count |
+| `EMAIL` | Email address | 0.95 | Format match |
+| `NATIONAL_ID` | Chinese ID card (18-digit) | 0.98 | ISO 7064 checksum |
+| `PASSPORT` | Passport number | 0.85 | Context-keyword gated |
+| `BANK_CARD` | Bank card (13-19 digits) | 0.92 | Luhn algorithm |
+| `PERSON_NAME` | Chinese/English name | 0.70 | Context-keyword gated |
+| `ADDRESS` | Chinese address (province/city/district) | 0.75 | Structural pattern + keyword |
+| `SOCIAL_ACCOUNT` | WeChat/QQ/Twitter etc. | 0.80 | Context-keyword gated |
 
-## ⚠️ 风险分级规则
+## ⚠️ Risk Level Rules
 
-**HIGH（高风险）**：
-- 检测到 `NATIONAL_ID`、`PASSPORT` 或 `BANK_CARD`
-- 或同时出现 `PERSON_NAME` + 联系方式（`PHONE`/`EMAIL`）+ `ADDRESS` 的组合
+**HIGH**:
+- `NATIONAL_ID`, `PASSPORT`, or `BANK_CARD` detected
+- Or combo: `PERSON_NAME` + contact (`PHONE`/`EMAIL`) + `ADDRESS`
 
-**LOW（低风险）**：
-- 单一弱标识（仅邮箱、仅手机号、仅社交账号等）
+**LOW**:
+- Single weak identifier (email only, phone only, social account only, etc.)
 
-## 📁 项目结构
+## 📁 Project Structure
 
 ```
 openclaw-security/
-├── SKILL.md                      # OpenClaw Skill 定义
-├── README.md                     # 本文件
+├── SKILL.md                      # OpenClaw Skill definition
+├── README.md
 ├── .gitignore
 ├── scripts/
-│   ├── audit_worker.py           # 主入口：检测 → 风险评级 → NDJSON 落盘
-│   ├── cleanup.py                # 审计日志清理（默认 7 天保留）
-│   └── detectors/                # PII 检测器模块
-│       ├── __init__.py           # 检测器注册表
-│       ├── base.py               # 基类 + Match 数据结构
-│       ├── phone.py              # 手机号/座机/国际号码
-│       ├── email_detector.py     # 邮箱
-│       ├── national_id.py        # 身份证（含校验位）
-│       ├── passport.py           # 护照（关键词门控）
-│       ├── bank_card.py          # 银行卡（Luhn 校验）
-│       ├── person_name.py        # 姓名（关键词门控）
-│       ├── address.py            # 地址（省市结构匹配）
-│       └── social_account.py     # 社交账号
+│   ├── audit_worker.py           # Main entry: detect → risk score → NDJSON sink
+│   ├── cleanup.py                # Audit log cleanup (default 7-day retention)
+│   └── detectors/                # PII detector modules
+│       ├── __init__.py           # Detector registry
+│       ├── base.py               # Base class + Match dataclass
+│       ├── phone.py              # Phone number (mobile/landline/intl)
+│       ├── email_detector.py     # Email address
+│       ├── national_id.py        # Chinese national ID (with checksum)
+│       ├── passport.py           # Passport (keyword-gated)
+│       ├── bank_card.py          # Bank card (Luhn validated)
+│       ├── person_name.py        # Person name (keyword-gated)
+│       ├── address.py            # Address (structural matching)
+│       └── social_account.py     # Social accounts
 ├── references/
-│   └── patterns.md               # 检测规则参考文档
-└── openclaw-security-audit/      # 审计日志输出（.gitignore 已排除）
+│   └── patterns.md               # Detection pattern reference
+└── openclaw-security-audit/      # Audit log output (excluded by .gitignore)
     └── YYYY-MM-DD/
         └── events.ndjson
 ```
 
-## 📋 审计记录格式
+## 📋 Audit Record Schema
 
-每条 NDJSON 记录包含：
+Each NDJSON line contains:
 
 ```json
 {
   "event_id": "uuid",
-  "session_id": "调用方传入的会话 ID",
+  "session_id": "caller-provided session ID",
   "source_type": "input | prompt | context | knowledge_base",
   "labels": ["PHONE", "EMAIL"],
   "risk_level": "high | low",
@@ -123,29 +123,29 @@ openclaw-security/
     {"label": "PHONE", "confidence": 0.90, "masked_preview": "138****5678"},
     {"label": "EMAIL", "confidence": 0.95, "masked_preview": "zh****@gmail.com"}
   ],
-  "content_hash": "sha256 前 16 位（用于去重，不存原文）",
+  "content_hash": "first 16 chars of SHA256 (for dedup, no raw content stored)",
   "created_at": "ISO 8601 UTC"
 }
 ```
 
-> **安全原则**：不存储原始敏感值，仅保留脱敏片段 + 内容哈希。
+> **Security Principle**: Raw sensitive values are never stored — only masked previews and content hashes.
 
-## 🧹 日志清理
+## 🧹 Log Cleanup
 
 ```bash
-# 默认清理 7 天前的日志
+# Default: remove logs older than 7 days
 python scripts/cleanup.py
 
-# 自定义保留期
+# Custom retention
 python scripts/cleanup.py --days 30
 
-# 预览模式（不实际删除）
+# Dry run (preview only)
 python scripts/cleanup.py --dry-run
 ```
 
-## ⚙️ 配置
+## ⚙️ Configuration
 
-通过环境变量自定义审计日志输出目录：
+Override the audit log output directory via environment variable:
 
 ```bash
 # Linux/macOS
@@ -155,45 +155,45 @@ export OPENCLAW_AUDIT_DIR="/path/to/custom/audit/dir"
 $env:OPENCLAW_AUDIT_DIR = "C:\path\to\custom\audit\dir"
 ```
 
-## 🔌 作为 OpenClaw Skill 使用
+## 🔌 Usage as OpenClaw Skill
 
-将本目录放入 OpenClaw Skills 目录后，AI 助手可自动识别并调用：
+Place this directory in your OpenClaw Skills folder. The AI assistant will automatically recognize and invoke it:
 
 ```
-用户: "帮我检查这段文本有没有敏感信息"
-AI:   运行 audit_worker.py 扫描 → 返回检测结果
+User: "Check this text for sensitive information"
+AI:   Runs audit_worker.py → returns detection results
 ```
 
-触发关键词：`security scan`、`PII detection`、`敏感信息检测`、`隐私审计`
+Trigger keywords: `security scan`, `PII detection`, `sensitive data check`, `privacy audit`
 
-## 🛡️ 安全设计
+## 🛡️ Security Design
 
-- **不存原文** — 仅保存脱敏预览 + SHA256 哈希
-- **本地存储** — 审计日志不会传输到外部
-- **关键词门控** — 姓名/地址/护照等弱信号需上下文关键词才触发，降低误报
-- **算法校验** — 身份证校验位、银行卡 Luhn 算法，拒绝格式匹配但无效的号码
-- **重叠去重** — 同一字符区间的多个匹配，只保留最高置信度结果
+- **No Raw Storage** — Only masked previews + SHA256 hash are persisted
+- **Local Only** — Audit logs are never transmitted externally
+- **Keyword Gating** — Weak signals (name/address/passport) require context keywords to fire, reducing false positives
+- **Algorithm Validation** — National ID checksum and Bank Card Luhn reject format-matching but invalid numbers
+- **Overlap Dedup** — Multiple matches on the same character range keep only the highest confidence result
 
-## 🗺️ 路线图
+## 🗺️ Roadmap
 
-- [ ] 批量扫描模式（`--batch`）
-- [ ] 支持 `tool_output` 源类型
-- [ ] NER 模型增强姓名/地址检测
-- [ ] HTML 审计报告生成
-- [ ] PIPL / GDPR 合规标签映射
-- [ ] 定时审计调度（cron / Task Scheduler）
+- [ ] Batch scan mode (`--batch`)
+- [ ] `tool_output` source type support
+- [ ] NER model enhancement for name/address detection
+- [ ] HTML audit report generation
+- [ ] PIPL / GDPR compliance label mapping
+- [ ] Scheduled audit (cron / Task Scheduler)
 
-## 📄 许可证
+## 📄 License
 
 Apache 2.0
 
-## 🤝 贡献
+## 🤝 Contributing
 
-欢迎 Issue 和 PR！新增检测器只需：
-1. 在 `scripts/detectors/` 下创建新模块，继承 `BaseDetector`
-2. 实现 `detect(text)` 方法，返回 `Match` 列表
-3. 在 `__init__.py` 中注册
+Issues and PRs are welcome! To add a new detector:
+1. Create a new module in `scripts/detectors/`, extending `BaseDetector`
+2. Implement `detect(text)` returning a list of `Match` objects
+3. Register it in `__init__.py`
 
 ---
 
-**Made with ❤️ for OpenClaw community**
+**Made with ❤️ for the OpenClaw community**
