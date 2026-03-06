@@ -11,6 +11,7 @@ class Match:
     masked_preview: str
     start: int
     end: int
+    region: str = ""  # ISO country code: CN, US, AU, SG, MY, TH, ID, DE, UK, FR
 
 
 class BaseDetector:

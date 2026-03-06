@@ -1,11 +1,11 @@
 ---
 name: openclaw-security
-description: "Async PII detection for OpenClaw sessions. Scans user input, prompts, context, and knowledge base content for sensitive personal data (phone numbers, emails, names, addresses, passports, bank cards, national IDs, social accounts). Use when: (1) user asks to audit or scan for PII / sensitive data, (2) 'security scan', (3) 'check for personal information', (4) 'PII detection', (5) background audit on session content, (6) '敏感信息检测', (7) '隐私审计'."
+description: "Multi-region async PII detection for OpenClaw sessions. Scans user input, prompts, context, and knowledge base content for sensitive personal data across CN, US, AU, UK, DE, FR, SG, MY, TH, ID regions. Detects phone numbers, emails, names, addresses, passports, bank cards, national IDs, social accounts. Use when: (1) user asks to audit or scan for PII / sensitive data, (2) 'security scan', (3) 'check for personal information', (4) 'PII detection', (5) background audit on session content, (6) 'sensitive data check', (7) 'privacy audit'."
 ---
 
 # OpenClaw Security - PII Audit Skill
 
-Async PII detection engine for OpenClaw sessions. Detects 8 categories of sensitive personal data and logs audit events locally as NDJSON.
+Multi-region async PII detection engine for OpenClaw sessions. Detects 8 categories of sensitive personal data across 10 country/region jurisdictions and logs audit events locally as NDJSON.
 
 ## Quick Start
 
@@ -39,6 +39,10 @@ python scripts/audit_worker.py --session-id S001 --source-type input --text "tes
 ## Detection Labels
 
 PHONE, EMAIL, PERSON_NAME, ADDRESS, PASSPORT, BANK_CARD, NATIONAL_ID, SOCIAL_ACCOUNT
+
+## Supported Regions
+
+CN, US, AU, SG, MY, TH, ID, DE, UK, FR (+ INTL via +CC phone prefix)
 
 ## Risk Levels
 

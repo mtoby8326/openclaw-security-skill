@@ -100,11 +100,14 @@ def scan(text, session_id, source_type, audit_dir):
     risk = compute_risk(labels)
     content_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
 
+    regions = sorted(set(m.region for m in all_matches if m.region))
+
     record = {
         "event_id": str(uuid.uuid4()),
         "session_id": session_id,
         "source_type": source_type,
         "labels": labels,
+        "regions": regions,
         "risk_level": risk,
         "detector_version": VERSION,
         "matched_count": len(all_matches),
@@ -113,6 +116,7 @@ def scan(text, session_id, source_type, audit_dir):
                 "label": m.label,
                 "confidence": m.confidence,
                 "masked_preview": m.masked_preview,
+                "region": m.region,
             }
             for m in all_matches
         ],
@@ -133,6 +137,7 @@ def scan(text, session_id, source_type, audit_dir):
         "status": "detected",
         "risk_level": risk,
         "labels": labels,
+        "regions": regions,
         "matched_count": len(all_matches),
         "audit_file": str(out_file),
     }
@@ -186,8 +191,9 @@ def main():
         else:
             print(f'[{result["risk_level"].upper()}] '
                   f'Detected {result["matched_count"]} PII match(es)')
-            print(f'  Labels: {", ".join(result["labels"])}')
-            print(f'  Audit:  {result["audit_file"]}')
+            print(f'  Labels:  {", ".join(result["labels"])}')
+            print(f'  Regions: {", ".join(result["regions"])}')
+            print(f'  Audit:   {result["audit_file"]}')
 
 
 if __name__ == '__main__':
