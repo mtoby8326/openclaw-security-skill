@@ -6,13 +6,16 @@ Usage:
     python audit_worker.py --session-id S001 --source-type input --text "inline text"
     python audit_worker.py --session-id S001 --source-type knowledge_base --file path.txt
     python audit_worker.py --session-id S001 --source-type input --text "text" --json
+    python audit_worker.py --session-id S001 --source-type input --text "text" --no-cache
 """
 
 import argparse
 import hashlib
 import json
 import os
+import random
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +30,7 @@ from detectors.base import Match
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 DEFAULT_AUDIT_DIR = os.environ.get(
     'OPENCLAW_AUDIT_DIR',
@@ -35,6 +38,81 @@ DEFAULT_AUDIT_DIR = os.environ.get(
 )
 
 HIGH_RISK_LABELS = {'NATIONAL_ID', 'PASSPORT', 'BANK_CARD'}
+
+# Smart sampling configuration per source_type.
+# rate:      probability [0.0, 1.0] of scanning content that is NOT in cache.
+# cache_ttl: seconds before a cached content_hash expires and becomes eligible
+#            for re-scanning.  Set to 0 to disable caching for a source type.
+SAMPLE_CONFIG = {
+    'input':          {'rate': 1.00, 'cache_ttl': 300},     # 100%, 5-min cache
+    'prompt':         {'rate': 0.20, 'cache_ttl': 86400},   # 20%,  24-hour cache
+    'context':        {'rate': 0.20, 'cache_ttl': 3600},    # 20%,  1-hour cache
+    'knowledge_base': {'rate': 1.00, 'cache_ttl': 86400},   # 100%, 24-hour cache (dedup)
+}
+
+CANCHE_MAX_ENTRIES = 5000   # Hard cap; prune to 3000 when exceeded
+CACHE_FILE_NAME = '.scan-cache.json'
+
+
+# ---------------------------------------------------------------------------
+# Scan Cache — file-backed dedup + sampling gate
+# ---------------------------------------------------------------------------
+class ScanCache:
+    """Lightweight file-backed cache tracking recently scanned content hashes.
+
+    The cache is stored as a JSON object ``{content_hash: epoch_seconds}`` in
+    the audit directory.  It is loaded once, mutated in-memory, and flushed
+    back on ``save()``.
+    """
+
+    def __init__(self, audit_dir: str):
+        self.path = Path(audit_dir) / CACHE_FILE_NAME
+        self.data: dict = self._load()
+
+    # -- persistence --------------------------------------------------------
+    def _load(self) -> dict:
+        if self.path.exists():
+            try:
+                return json.loads(self.path.read_text(encoding='utf-8'))
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(self.data, ensure_ascii=False),
+            encoding='utf-8',
+        )
+
+    # -- query / update -----------------------------------------------------
+    def is_fresh(self, content_hash: str, ttl: int) -> bool:
+        """Return True if *content_hash* was scanned within the last *ttl* seconds."""
+        ts = self.data.get(content_hash)
+        if ts is None:
+            return False
+        return (time.time() - ts) < ttl
+
+    def record(self, content_hash: str) -> None:
+        """Mark *content_hash* as just-scanned and prune if over capacity."""
+        self.data[content_hash] = time.time()
+        if len(self.data) > CANCHE_MAX_ENTRIES:
+            # Keep the most recent 3000 entries
+            ranked = sorted(self.data.items(), key=lambda kv: kv[1], reverse=True)
+            self.data = dict(ranked[:3000])
+
+    # -- decision -----------------------------------------------------------
+    def should_scan(self, content_hash: str, source_type: str) -> bool:
+        """Decide whether to scan based on cache freshness + sampling rate.
+
+        Returns ``False`` (skip) when either:
+        1. The content was scanned within the TTL window, OR
+        2. The random draw exceeds the sampling rate for this source_type.
+        """
+        cfg = SAMPLE_CONFIG.get(source_type, SAMPLE_CONFIG['input'])
+        if cfg['cache_ttl'] > 0 and self.is_fresh(content_hash, cfg['cache_ttl']):
+            return False
+        return random.random() < cfg['rate']
 
 
 # ---------------------------------------------------------------------------
@@ -78,11 +156,30 @@ def compute_risk(labels):
 # ---------------------------------------------------------------------------
 # Core
 # ---------------------------------------------------------------------------
-def scan(text, session_id, source_type, audit_dir):
+def scan(text, session_id, source_type, audit_dir, *, use_cache=True):
     """Run all detectors, dedupe, compute risk, write NDJSON record.
+
+    When *use_cache* is True (default), the scan cache and per-source-type
+    sampling rates are respected — identical content is not re-scanned within
+    the configured TTL, and low-priority sources may be randomly skipped.
 
     Returns a summary dict (never raises on detection failure).
     """
+    content_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+
+    # --- Smart sampling gate -----------------------------------------------
+    cache = None
+    if use_cache:
+        cache = ScanCache(audit_dir)
+        if not cache.should_scan(content_hash, source_type):
+            return {
+                "status": "skipped",
+                "reason": "cached_or_sampled_out",
+                "content_hash": content_hash,
+                "matched_count": 0,
+            }
+
+    # --- Detection ---------------------------------------------------------
     all_matches = []
     for detector in ALL_DETECTORS:
         try:
@@ -93,12 +190,16 @@ def scan(text, session_id, source_type, audit_dir):
 
     all_matches = dedupe_overlapping(all_matches)
 
+    # Update cache regardless of detection result
+    if cache is not None:
+        cache.record(content_hash)
+        cache.save()
+
     if not all_matches:
         return {"status": "clean", "matched_count": 0}
 
     labels = sorted(set(m.label for m in all_matches))
     risk = compute_risk(labels)
-    content_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
 
     regions = sorted(set(m.region for m in all_matches if m.region))
 
@@ -164,6 +265,8 @@ def main():
                         help='Audit output directory')
     parser.add_argument('--json', action='store_true',
                         help='Output result as JSON')
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Bypass scan cache and sampling (force full scan)')
     args = parser.parse_args()
 
     # --- Read input ---
@@ -180,13 +283,19 @@ def main():
         sys.exit(1)
 
     # --- Scan ---
-    result = scan(text, args.session_id, args.source_type, args.audit_dir)
+    result = scan(
+        text, args.session_id, args.source_type, args.audit_dir,
+        use_cache=not args.no_cache,
+    )
 
     # --- Output ---
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        if result['status'] == 'clean':
+        if result['status'] == 'skipped':
+            print(f'[SKIP] Content already scanned or sampled out '
+                  f'(hash={result["content_hash"]})')
+        elif result['status'] == 'clean':
             print('[CLEAN] No PII detected.')
         else:
             print(f'[{result["risk_level"].upper()}] '

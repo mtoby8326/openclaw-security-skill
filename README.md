@@ -12,6 +12,7 @@ A multi-region async PII (Personally Identifiable Information) detection engine 
 - **Region Classification** — Each match tagged with ISO country code
 - **Overlap Dedup** — Same text range: highest confidence wins
 - **Risk Scoring** — Two-level (high/low) with single-label and combo rules
+- **Smart Sampling** — Per-source-type sampling rates + content-hash cache dedup
 - **Local NDJSON Storage** — Partitioned by date, grep/SIEM-friendly
 - **Auto Cleanup** — Configurable retention (default: 7 days)
 
@@ -78,6 +79,24 @@ python scripts/audit_worker.py --session-id S001 --source-type knowledge_base \
 | `PERSON_NAME` | CN/Western/DE/FR names | 0.70-0.75 | Keyword / title gated |
 | `ADDRESS` | CN/US/AU/UK/DE/FR addresses | 0.75-0.80 | Structural + keyword |
 | `SOCIAL_ACCOUNT` | WeChat/QQ/Twitter etc. | 0.80 | Keyword-gated |
+
+## 🎯 Smart Sampling
+
+The audit worker includes built-in smart sampling to avoid redundant scans on large or repetitive context:
+
+| Source Type | Scan Rate | Cache TTL | Rationale |
+|---|---|---|---|
+| `input` | 100% | 5 min | Every user message scanned; identical repeats within 5 min skipped |
+| `prompt` | 20% | 24 hours | System prompts rarely change; scan once, cache long |
+| `context` | 20% | 1 hour | Conversation context overlaps heavily; sample 1 in 5 |
+| `knowledge_base` | 100% | 24 hours | Static content fully scanned once, then deduped |
+
+**How it works**: The script computes a SHA256 content hash, checks a file-backed cache (`.scan-cache.json`), and applies the sampling rate. The caller (Agent) does not need to decide when to skip — just feed all content through, and the script handles the rest.
+
+```bash
+# Force scan (bypass cache + sampling)
+python scripts/audit_worker.py --session-id S001 --source-type context --text "..." --no-cache
+```
 
 ## ⚠️ Risk Level Rules
 
@@ -161,6 +180,7 @@ $env:OPENCLAW_AUDIT_DIR = "C:\path\to\custom\audit\dir"        # PowerShell
 
 ## 🗺️ Roadmap
 
+- [x] Smart sampling with content-hash dedup (v0.2.0)
 - [ ] Batch scan mode (`--batch`)
 - [ ] `tool_output` source type
 - [ ] NER model enhancement for name/address
