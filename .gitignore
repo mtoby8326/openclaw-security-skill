@@ -1,6 +1,10 @@
 # Audit logs (contain sensitive masked data, should NOT be committed)
 openclaw-security-audit/
 
+# Scan cache and lock files
+.scan-cache.json
+*.lock
+
 # Python
 __pycache__/
 *.pyc

@@ -13,8 +13,12 @@ A multi-region async PII (Personally Identifiable Information) detection engine 
 - **Overlap Dedup** — Same text range: highest confidence wins
 - **Risk Scoring** — Two-level (high/low) with single-label and combo rules
 - **Smart Sampling** — Per-source-type sampling rates + content-hash cache dedup
+- **Complete Audit Trail** — All outcomes (detected, clean, skipped) logged for compliance
+- **Concurrent-Safe** — File locking on NDJSON + cache writes for parallel background scans
+- **32K Input Cap** — Truncates oversized content; records original size + truncation flag
+- **Secure Input Channel** — `--file` + `--delete-after-read` for background scans (no PII in process args)
 - **Local NDJSON Storage** — Partitioned by date, grep/SIEM-friendly
-- **Auto Cleanup** — Configurable retention (default: 7 days)
+- **Auto Cleanup** — Configurable retention (default: 7 days) + scan cache pruning
 
 ## 🌍 Supported Regions
 
@@ -41,17 +45,17 @@ cd openclaw-security-skill
 ### Scan Text
 
 ```bash
-# Multi-region scan
-python scripts/audit_worker.py --session-id S001 --source-type input \
-  --text "Name: Zhang San, Phone: 13812345678, SSN: 078-05-1120, Mr. John Smith"
-
-# JSON output
-python scripts/audit_worker.py --session-id S001 --source-type input \
-  --text "NI number AB123456C, address: 42 Wallaby Way NSW 2000" --json
-
-# Scan from file
+# Scan from file (recommended)
 python scripts/audit_worker.py --session-id S001 --source-type knowledge_base \
   --file path/to/content.txt
+
+# Scan from file + auto-delete (secure temp-file workflow)
+python scripts/audit_worker.py --session-id S001 --source-type input \
+  --file tmp_scan.txt --delete-after-read
+
+# Quick manual test (WARNING: content visible in process list)
+python scripts/audit_worker.py --session-id S001 --source-type input \
+  --text "Name: Zhang San, Phone: 13812345678" --json
 ```
 
 ### Sample Output
@@ -106,25 +110,30 @@ python scripts/audit_worker.py --session-id S001 --source-type context --text ".
 
 ## 📋 Audit Record Schema
 
+Every scan invocation writes an NDJSON record — including `clean` and `skipped` outcomes.
+
 ```json
 {
   "event_id": "uuid",
-  "session_id": "caller-provided session ID",
+  "session_id": "caller-provided session ID (required)",
   "source_type": "input | prompt | context | knowledge_base",
+  "status": "detected | clean | skipped",
   "labels": ["PHONE", "NATIONAL_ID"],
   "regions": ["CN", "US"],
   "risk_level": "high",
   "matched_count": 3,
   "matches": [
-    {"label": "PHONE", "confidence": 0.90, "masked_preview": "138****5678", "region": "CN"},
-    {"label": "NATIONAL_ID", "confidence": 0.90, "masked_preview": "***-**-1120", "region": "US"}
+    {"label": "PHONE", "confidence": 0.90, "masked_preview": "13*******00", "region": "CN"},
+    {"label": "NATIONAL_ID", "confidence": 0.90, "masked_preview": "***-**-**20", "region": "US"}
   ],
   "content_hash": "sha256[:16]",
+  "input_chars": 256,
+  "truncated": false,
   "created_at": "ISO 8601 UTC"
 }
 ```
 
-> **Security Principle**: Raw sensitive values are never stored — only masked previews and content hashes.
+> **Security Principle**: Raw sensitive values are never stored — only minimally masked previews and content hashes.
 
 ## 📁 Project Structure
 
@@ -135,7 +144,8 @@ openclaw-security/
 ├── .gitignore
 ├── scripts/
 │   ├── audit_worker.py           # Main entry: detect → risk score → NDJSON sink
-│   ├── cleanup.py                # Audit log cleanup (default 7-day retention)
+│   ├── cleanup.py                # Audit log + cache cleanup (UTC-aware)
+│   ├── file_lock.py              # Cross-platform file lock (O_CREAT|O_EXCL)
 │   └── detectors/                # PII detector modules (multi-region)
 │       ├── __init__.py           # Detector registry
 │       ├── base.py               # Base class + Match dataclass (with region)
@@ -172,15 +182,20 @@ $env:OPENCLAW_AUDIT_DIR = "C:\path\to\custom\audit\dir"        # PowerShell
 
 ## 🛡️ Security Design
 
-- **No Raw Storage** — Only masked previews + SHA256 hash persisted
+- **Minimal Masking** — Only 2-3 characters exposed per sensitive value; raw values never stored
+- **Secure Input Channel** — `--file` + `--delete-after-read` prevents PII exposure in process args
+- **Concurrent-Safe** — FileLock on all shared files (NDJSON, cache) prevents corruption
+- **32K Input Cap** — Truncation prevents ReDoS and memory exhaustion attacks
 - **Local Only** — Audit logs never transmitted externally
 - **Keyword Gating** — Weak signals require context keywords to fire
 - **Algorithm Validation** — CN ID / AU TFN / TH ID / FR NIR checksums; Bank Card Luhn; US SSN range validation
 - **Overlap Dedup** — Highest confidence result kept per character range
+- **Complete Audit Trail** — All outcomes (detected, clean, skipped) logged for compliance proof
 
 ## 🗺️ Roadmap
 
 - [x] Smart sampling with content-hash dedup (v0.2.0)
+- [x] Security hardening: file locking, 32K cap, secure input channel, audit-all, tighter masking (v0.3.0)
 - [ ] Batch scan mode (`--batch`)
 - [ ] `tool_output` source type
 - [ ] NER model enhancement for name/address

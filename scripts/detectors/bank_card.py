@@ -44,7 +44,7 @@ class BankCardDetector(BaseDetector):
                     matches.append(Match(
                         label=self.label,
                         confidence=0.92,
-                        masked_preview=clean[:4] + ' **** **** ' + clean[-4:],
+                        masked_preview=clean[:2] + ' **** **** **** ' + clean[-2:],
                         start=m.start(),
                         end=m.end(),
                     ))

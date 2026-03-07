@@ -117,7 +117,7 @@ class NationalIdDetector(BaseDetector):
             if self._cn_check(raw):
                 matches.append(Match(
                     label=self.label, confidence=0.98,
-                    masked_preview=raw[:6] + '********' + raw[-4:],
+                    masked_preview=raw[:3] + '**************' + raw[-1:],
                     start=m.start(), end=m.end(), region='CN'))
 
         # US SSN (keyword-gated)
@@ -130,7 +130,7 @@ class NationalIdDetector(BaseDetector):
                     continue
                 matches.append(Match(
                     label=self.label, confidence=0.90,
-                    masked_preview=f'***-**-{serial}',
+                    masked_preview=f'***-**-**{serial[-2:]}',
                     start=m.start(), end=m.end(), region='US'))
 
         # AU TFN (keyword-gated + checksum)
@@ -140,7 +140,7 @@ class NationalIdDetector(BaseDetector):
                 if self._au_tfn_check(digits):
                     matches.append(Match(
                         label=self.label, confidence=0.92,
-                        masked_preview=digits[:3] + ' *** ' + digits[-3:],
+                        masked_preview=digits[:2] + ' ***** ' + digits[-1:],
                         start=m.start(), end=m.end(), region='AU'))
 
         # SG NRIC (keyword-gated)
@@ -149,7 +149,7 @@ class NationalIdDetector(BaseDetector):
                 raw = m.group(1)
                 matches.append(Match(
                     label=self.label, confidence=0.88,
-                    masked_preview=raw[0] + '****' + raw[-4:],
+                    masked_preview=raw[0] + '*******' + raw[-1:],
                     start=m.start(), end=m.end(), region='SG'))
 
         # MY MyKad (keyword-gated + date validation)
@@ -163,7 +163,7 @@ class NationalIdDetector(BaseDetector):
                     continue
                 matches.append(Match(
                     label=self.label, confidence=0.88,
-                    masked_preview=digits[:6] + '-**-' + digits[-4:],
+                    masked_preview=digits[:2] + '********' + digits[-1:],
                     start=m.start(), end=m.end(), region='MY'))
 
         # TH National ID (keyword-gated + checksum)
@@ -173,7 +173,7 @@ class NationalIdDetector(BaseDetector):
                 if self._th_check(digits):
                     matches.append(Match(
                         label=self.label, confidence=0.90,
-                        masked_preview=digits[0] + '-****-*****-**-' + digits[-1],
+                        masked_preview=digits[:2] + '-***********-' + digits[-1],
                         start=m.start(), end=m.end(), region='TH'))
 
         # ID NIK (keyword-gated + date validation)
@@ -187,7 +187,7 @@ class NationalIdDetector(BaseDetector):
                     continue
                 matches.append(Match(
                     label=self.label, confidence=0.85,
-                    masked_preview=d[:6] + '******' + d[-4:],
+                    masked_preview=d[:2] + '************' + d[-1:],
                     start=m.start(), end=m.end(), region='ID'))
 
         # DE Steuer-ID (keyword-gated)
@@ -200,7 +200,7 @@ class NationalIdDetector(BaseDetector):
                     continue
                 matches.append(Match(
                     label=self.label, confidence=0.85,
-                    masked_preview=digits[:2] + ' *** *** ' + digits[-3:],
+                    masked_preview=digits[:2] + ' ******* ' + digits[-1:],
                     start=m.start(), end=m.end(), region='DE'))
 
         # UK NIN (keyword-gated)
@@ -209,7 +209,7 @@ class NationalIdDetector(BaseDetector):
                 raw = re.sub(r'\s', '', m.group(1))
                 matches.append(Match(
                     label=self.label, confidence=0.90,
-                    masked_preview=raw[:2] + ' ** ** ** ' + raw[-1],
+                    masked_preview=raw[:2] + ' ****** ' + raw[-1],
                     start=m.start(), end=m.end(), region='UK'))
 
         # FR NIR (keyword-gated + mod-97 check)
@@ -219,7 +219,7 @@ class NationalIdDetector(BaseDetector):
                 if self._fr_nir_check(digits):
                     matches.append(Match(
                         label=self.label, confidence=0.92,
-                        masked_preview=digits[0] + ' ** ** *** *** ' + digits[-2:],
+                        masked_preview=digits[0] + ' ************ ' + digits[-1:],
                         start=m.start(), end=m.end(), region='FR'))
 
         return matches

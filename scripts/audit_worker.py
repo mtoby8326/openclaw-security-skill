@@ -3,10 +3,16 @@
 
 Usage:
     echo "text" | python audit_worker.py --session-id S001 --source-type input
-    python audit_worker.py --session-id S001 --source-type input --text "inline text"
+    python audit_worker.py --session-id S001 --source-type input --text "short text"
     python audit_worker.py --session-id S001 --source-type knowledge_base --file path.txt
+    python audit_worker.py --session-id S001 --source-type input --file tmp.txt --delete-after-read
     python audit_worker.py --session-id S001 --source-type input --text "text" --json
     python audit_worker.py --session-id S001 --source-type input --text "text" --no-cache
+
+Security note:
+    --text passes content via command-line args, which are visible in the
+    process list.  For background / automated scans, prefer --file with
+    --delete-after-read to avoid exposing PII in process metadata.
 """
 
 import argparse
@@ -14,6 +20,7 @@ import hashlib
 import json
 import os
 import random
+import stat
 import sys
 import time
 import uuid
@@ -26,11 +33,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from detectors import ALL_DETECTORS
 from detectors.base import Match
+from file_lock import FileLock
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 DEFAULT_AUDIT_DIR = os.environ.get(
     'OPENCLAW_AUDIT_DIR',
@@ -38,6 +46,11 @@ DEFAULT_AUDIT_DIR = os.environ.get(
 )
 
 HIGH_RISK_LABELS = {'NATIONAL_ID', 'PASSPORT', 'BANK_CARD'}
+
+# Maximum input size in characters.  Content exceeding this limit is truncated
+# to the first MAX_INPUT_CHARS characters; the audit record will carry
+# ``truncated: true`` and the original ``input_chars`` count.
+MAX_INPUT_CHARS = 32768
 
 # Smart sampling configuration per source_type.
 # rate:      probability [0.0, 1.0] of scanning content that is NOT in cache.
@@ -50,7 +63,7 @@ SAMPLE_CONFIG = {
     'knowledge_base': {'rate': 1.00, 'cache_ttl': 86400},   # 100%, 24-hour cache (dedup)
 }
 
-CANCHE_MAX_ENTRIES = 5000   # Hard cap; prune to 3000 when exceeded
+CACHE_MAX_ENTRIES = 5000   # Hard cap; prune to 3000 when exceeded
 CACHE_FILE_NAME = '.scan-cache.json'
 
 
@@ -61,29 +74,32 @@ class ScanCache:
     """Lightweight file-backed cache tracking recently scanned content hashes.
 
     The cache is stored as a JSON object ``{content_hash: epoch_seconds}`` in
-    the audit directory.  It is loaded once, mutated in-memory, and flushed
-    back on ``save()``.
+    the audit directory.  All file I/O is protected by a FileLock to support
+    concurrent background scans.
     """
 
     def __init__(self, audit_dir: str):
         self.path = Path(audit_dir) / CACHE_FILE_NAME
+        self._lock_path = str(self.path) + '.lock'
         self.data: dict = self._load()
 
     # -- persistence --------------------------------------------------------
     def _load(self) -> dict:
         if self.path.exists():
             try:
-                return json.loads(self.path.read_text(encoding='utf-8'))
+                with FileLock(self._lock_path):
+                    return json.loads(self.path.read_text(encoding='utf-8'))
             except (json.JSONDecodeError, OSError):
                 return {}
         return {}
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.data, ensure_ascii=False),
-            encoding='utf-8',
-        )
+        with FileLock(self._lock_path):
+            self.path.write_text(
+                json.dumps(self.data, ensure_ascii=False),
+                encoding='utf-8',
+            )
 
     # -- query / update -----------------------------------------------------
     def is_fresh(self, content_hash: str, ttl: int) -> bool:
@@ -96,7 +112,7 @@ class ScanCache:
     def record(self, content_hash: str) -> None:
         """Mark *content_hash* as just-scanned and prune if over capacity."""
         self.data[content_hash] = time.time()
-        if len(self.data) > CANCHE_MAX_ENTRIES:
+        if len(self.data) > CACHE_MAX_ENTRIES:
             # Keep the most recent 3000 entries
             ranked = sorted(self.data.items(), key=lambda kv: kv[1], reverse=True)
             self.data = dict(ranked[:3000])
@@ -153,25 +169,73 @@ def compute_risk(labels):
     return 'low'
 
 
+def _write_audit_record(record: dict, audit_dir: str) -> str:
+    """Persist an audit record to the day-partitioned NDJSON file.
+
+    File writes are protected by a FileLock to support concurrent processes.
+    Returns the path of the output file.
+    """
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    day_dir = Path(audit_dir) / today
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    # Best-effort restrictive permissions (owner-only) — limited on Windows
+    try:
+        day_dir.chmod(stat.S_IRWXU)
+    except OSError:
+        pass
+
+    out_file = day_dir / 'events.ndjson'
+    line = json.dumps(record, ensure_ascii=False) + '\n'
+
+    with FileLock(str(out_file) + '.lock'):
+        with open(out_file, 'a', encoding='utf-8') as f:
+            f.write(line)
+
+    return str(out_file)
+
+
 # ---------------------------------------------------------------------------
 # Core
 # ---------------------------------------------------------------------------
-def scan(text, session_id, source_type, audit_dir, *, use_cache=True):
+def scan(text, session_id, source_type, audit_dir, *,
+         use_cache=True, input_chars=0, truncated=False):
     """Run all detectors, dedupe, compute risk, write NDJSON record.
 
     When *use_cache* is True (default), the scan cache and per-source-type
     sampling rates are respected — identical content is not re-scanned within
     the configured TTL, and low-priority sources may be randomly skipped.
 
+    Every invocation writes an audit record (detected, clean, OR skipped)
+    to ensure a complete audit trail.
+
     Returns a summary dict (never raises on detection failure).
     """
     content_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+    now = datetime.now(timezone.utc).isoformat()
+    base_fields = {
+        "event_id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "source_type": source_type,
+        "detector_version": VERSION,
+        "content_hash": content_hash,
+        "input_chars": input_chars,
+        "truncated": truncated,
+        "created_at": now,
+    }
 
     # --- Smart sampling gate -----------------------------------------------
     cache = None
     if use_cache:
         cache = ScanCache(audit_dir)
         if not cache.should_scan(content_hash, source_type):
+            skip_record = {
+                **base_fields,
+                "status": "skipped",
+                "reason": "cached_or_sampled_out",
+                "matched_count": 0,
+            }
+            _write_audit_record(skip_record, audit_dir)
             return {
                 "status": "skipped",
                 "reason": "cached_or_sampled_out",
@@ -195,22 +259,27 @@ def scan(text, session_id, source_type, audit_dir, *, use_cache=True):
         cache.record(content_hash)
         cache.save()
 
+    # --- No PII found → clean ---------------------------------------------
     if not all_matches:
+        clean_record = {
+            **base_fields,
+            "status": "clean",
+            "matched_count": 0,
+        }
+        _write_audit_record(clean_record, audit_dir)
         return {"status": "clean", "matched_count": 0}
 
+    # --- PII detected → full record ----------------------------------------
     labels = sorted(set(m.label for m in all_matches))
     risk = compute_risk(labels)
-
     regions = sorted(set(m.region for m in all_matches if m.region))
 
     record = {
-        "event_id": str(uuid.uuid4()),
-        "session_id": session_id,
-        "source_type": source_type,
+        **base_fields,
+        "status": "detected",
         "labels": labels,
         "regions": regions,
         "risk_level": risk,
-        "detector_version": VERSION,
         "matched_count": len(all_matches),
         "matches": [
             {
@@ -221,18 +290,9 @@ def scan(text, session_id, source_type, audit_dir, *, use_cache=True):
             }
             for m in all_matches
         ],
-        "content_hash": content_hash,
-        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Persist to NDJSON (one line per event, partitioned by date)
-    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    day_dir = Path(audit_dir) / today
-    day_dir.mkdir(parents=True, exist_ok=True)
-
-    out_file = day_dir / 'events.ndjson'
-    with open(out_file, 'a', encoding='utf-8') as f:
-        f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    audit_file = _write_audit_record(record, audit_dir)
 
     return {
         "status": "detected",
@@ -240,7 +300,7 @@ def scan(text, session_id, source_type, audit_dir, *, use_cache=True):
         "labels": labels,
         "regions": regions,
         "matched_count": len(all_matches),
-        "audit_file": str(out_file),
+        "audit_file": audit_file,
     }
 
 
@@ -251,8 +311,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='OpenClaw PII Audit Worker — detect and log sensitive data'
     )
-    parser.add_argument('--session-id', default='unknown',
-                        help='Session identifier (default: unknown)')
+    parser.add_argument('--session-id', required=True,
+                        help='Session identifier (required)')
     parser.add_argument('--source-type',
                         choices=['input', 'prompt', 'context', 'knowledge_base'],
                         default='input',
@@ -260,7 +320,9 @@ def main():
     parser.add_argument('--file',
                         help='Read content from file instead of stdin')
     parser.add_argument('--text',
-                        help='Inline text to scan')
+                        help='Inline text to scan (WARNING: visible in process list)')
+    parser.add_argument('--delete-after-read', action='store_true',
+                        help='Delete the --file after reading (for temp-file workflow)')
     parser.add_argument('--audit-dir', default=DEFAULT_AUDIT_DIR,
                         help='Audit output directory')
     parser.add_argument('--json', action='store_true',
@@ -275,6 +337,12 @@ def main():
     elif args.file:
         with open(args.file, 'r', encoding='utf-8') as f:
             text = f.read()
+        if args.delete_after_read:
+            try:
+                os.remove(args.file)
+            except OSError as exc:
+                print(f'[WARN] Could not delete temp file {args.file}: {exc}',
+                      file=sys.stderr)
     else:
         text = sys.stdin.read()
 
@@ -282,10 +350,21 @@ def main():
         print('No input provided.', file=sys.stderr)
         sys.exit(1)
 
+    # --- Size cap ---
+    original_chars = len(text)
+    truncated = False
+    if original_chars > MAX_INPUT_CHARS:
+        text = text[:MAX_INPUT_CHARS]
+        truncated = True
+        print(f'[INFO] Input truncated: {original_chars} -> {MAX_INPUT_CHARS} chars',
+              file=sys.stderr)
+
     # --- Scan ---
     result = scan(
         text, args.session_id, args.source_type, args.audit_dir,
         use_cache=not args.no_cache,
+        input_chars=original_chars,
+        truncated=truncated,
     )
 
     # --- Output ---

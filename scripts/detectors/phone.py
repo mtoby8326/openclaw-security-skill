@@ -53,7 +53,7 @@ class PhoneDetector(BaseDetector):
             matches.append(Match(
                 label=self.label,
                 confidence=confidence,
-                masked_preview=self._mask(clean),
+                masked_preview=self._mask(clean, keep_start=2, keep_end=2),
                 start=start, end=end,
                 region=region,
             ))
