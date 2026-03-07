@@ -20,12 +20,22 @@ DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 def prune_scan_cache(audit_path, max_age_seconds, dry_run=False):
-    """Remove expired entries from .scan-cache.json."""
+    """Remove expired entries from .scan-cache.json.
+
+    Uses FileLock for consistency with audit_worker.py's ScanCache.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from file_lock import FileLock
+
     cache_file = audit_path / '.scan-cache.json'
     if not cache_file.exists():
         return
+
+    lock_path = str(cache_file) + '.lock'
     try:
-        data = json.loads(cache_file.read_text(encoding='utf-8'))
+        with FileLock(lock_path):
+            data = json.loads(cache_file.read_text(encoding='utf-8'))
     except (json.JSONDecodeError, OSError):
         return
 
@@ -41,7 +51,13 @@ def prune_scan_cache(audit_path, max_age_seconds, dry_run=False):
     if dry_run:
         print(f'[DRY-RUN] Scan cache: would prune {pruned}/{before} expired entries.')
     else:
-        cache_file.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        try:
+            with FileLock(lock_path):
+                cache_file.write_text(
+                    json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        except OSError as exc:
+            print(f'[WARN] Could not write scan cache: {exc}')
+            return
         print(f'Scan cache: pruned {pruned}/{before} expired entries.')
 
 

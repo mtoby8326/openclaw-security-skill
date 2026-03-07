@@ -224,18 +224,31 @@ def scan(text, session_id, source_type, audit_dir, *,
         "created_at": now,
     }
 
+    def _safe_write(record):
+        """Write audit record; log warning instead of crashing on I/O errors."""
+        try:
+            return _write_audit_record(record, audit_dir)
+        except Exception as exc:
+            print(f'[WARN] Failed to write audit record: {exc}', file=sys.stderr)
+            return None
+
     # --- Smart sampling gate -----------------------------------------------
     cache = None
     if use_cache:
-        cache = ScanCache(audit_dir)
-        if not cache.should_scan(content_hash, source_type):
+        try:
+            cache = ScanCache(audit_dir)
+        except Exception as exc:
+            print(f'[WARN] Cache load failed, scanning without cache: {exc}',
+                  file=sys.stderr)
+            cache = None
+        if cache is not None and not cache.should_scan(content_hash, source_type):
             skip_record = {
                 **base_fields,
                 "status": "skipped",
                 "reason": "cached_or_sampled_out",
                 "matched_count": 0,
             }
-            _write_audit_record(skip_record, audit_dir)
+            _safe_write(skip_record)
             return {
                 "status": "skipped",
                 "reason": "cached_or_sampled_out",
@@ -256,8 +269,11 @@ def scan(text, session_id, source_type, audit_dir, *,
 
     # Update cache regardless of detection result
     if cache is not None:
-        cache.record(content_hash)
-        cache.save()
+        try:
+            cache.record(content_hash)
+            cache.save()
+        except Exception as exc:
+            print(f'[WARN] Cache save failed: {exc}', file=sys.stderr)
 
     # --- No PII found → clean ---------------------------------------------
     if not all_matches:
@@ -266,7 +282,7 @@ def scan(text, session_id, source_type, audit_dir, *,
             "status": "clean",
             "matched_count": 0,
         }
-        _write_audit_record(clean_record, audit_dir)
+        _safe_write(clean_record)
         return {"status": "clean", "matched_count": 0}
 
     # --- PII detected → full record ----------------------------------------
@@ -292,16 +308,18 @@ def scan(text, session_id, source_type, audit_dir, *,
         ],
     }
 
-    audit_file = _write_audit_record(record, audit_dir)
+    audit_file = _safe_write(record)
 
-    return {
+    result = {
         "status": "detected",
         "risk_level": risk,
         "labels": labels,
         "regions": regions,
         "matched_count": len(all_matches),
-        "audit_file": audit_file,
     }
+    if audit_file:
+        result["audit_file"] = audit_file
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +329,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='OpenClaw PII Audit Worker — detect and log sensitive data'
     )
-    parser.add_argument('--session-id', required=True,
-                        help='Session identifier (required)')
+    parser.add_argument('--session-id', default='unknown',
+                        help='Session identifier (default: unknown, warns if not set)')
     parser.add_argument('--source-type',
                         choices=['input', 'prompt', 'context', 'knowledge_base'],
                         default='input',
@@ -331,12 +349,32 @@ def main():
                         help='Bypass scan cache and sampling (force full scan)')
     args = parser.parse_args()
 
-    # --- Read input ---
+    # --- Validate flags ---
+    if args.session_id == 'unknown':
+        print('[WARN] --session-id not set, using "unknown". '
+              'Provide a session ID for proper audit correlation.',
+              file=sys.stderr)
+
+    if args.text and args.file:
+        print('[WARN] Both --text and --file provided; --file is ignored.',
+              file=sys.stderr)
+
+    if args.delete_after_read and not args.file:
+        print('[WARN] --delete-after-read has no effect without --file.',
+              file=sys.stderr)
+
+    # --- Read input (with size cap applied during read) ---
+    read_limit = MAX_INPUT_CHARS + 1  # read one extra char to detect truncation
+
     if args.text:
         text = args.text
     elif args.file:
-        with open(args.file, 'r', encoding='utf-8') as f:
-            text = f.read()
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                text = f.read(read_limit)
+        except OSError as exc:
+            print(f'[ERROR] Cannot read file {args.file}: {exc}', file=sys.stderr)
+            sys.exit(1)
         if args.delete_after_read:
             try:
                 os.remove(args.file)
@@ -344,7 +382,7 @@ def main():
                 print(f'[WARN] Could not delete temp file {args.file}: {exc}',
                       file=sys.stderr)
     else:
-        text = sys.stdin.read()
+        text = sys.stdin.read(read_limit)
 
     if not text.strip():
         print('No input provided.', file=sys.stderr)
@@ -356,7 +394,8 @@ def main():
     if original_chars > MAX_INPUT_CHARS:
         text = text[:MAX_INPUT_CHARS]
         truncated = True
-        print(f'[INFO] Input truncated: {original_chars} -> {MAX_INPUT_CHARS} chars',
+        # original_chars is approximate when reading from file (could be larger)
+        print(f'[INFO] Input truncated to {MAX_INPUT_CHARS} chars',
               file=sys.stderr)
 
     # --- Scan ---
